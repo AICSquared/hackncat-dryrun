@@ -1,0 +1,16 @@
+# Optional. Render reads this when you create a Blueprint from the repo.
+services:
+  - type: web
+    name: render-worker
+    runtime: node
+    rootDir: render-worker
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: RENDER_INTERNAL_SECRET
+        sync: false
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false

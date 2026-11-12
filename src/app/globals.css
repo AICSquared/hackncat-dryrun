@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* Direction D: Clinical Calm. Warm light ground, white surfaces, one blue, plain language.
+   Change the look here; every page uses these tokens through Tailwind classes. */
+@theme {
+  --color-ground: #f6f5f2;
+  --color-surface: #ffffff;
+  --color-ink: #1c1f24;
+  --color-ink-2: #4a4e55;
+  --color-ink-3: #5d6168;
+  --color-line: #e4e1da;
+  --color-accent: #1f4fa3;
+  --color-accent-strong: #163a7a;
+  --color-ok: #1b7f45;
+  --color-ok-bg: #e3f2e8;
+  --color-warn: #7a4a00;
+  --color-warn-bg: #fbefd9;
+  --color-crit: #a3261c;
+  --color-crit-tag: #8f1f16;
+  --color-crit-bg: #fbe6e3;
+  --color-info-bg: #ecebe6;
+
+  --font-sans: var(--font-public-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Corner style: Subtle. Change these three to try Square (0), Soft (16px/10px) or Round. */
+  --radius-card: 6px;
+  --radius-control: 6px;
+  --radius-tag: 4px;
+}
+
+html { color-scheme: light; }
+body { background: var(--color-ground); color: var(--color-ink); }
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+h1, h2, h3 { text-wrap: balance; }

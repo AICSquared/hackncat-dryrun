@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HackNCAT Control Room</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: summary strip on top, tracks (the work) left, lead feed right, agents (the workers) below. Wall view scales it up for a monitor. */
+:root {
+  --bg: #eef1f4;
+  --panel: #ffffff;
+  --ink: #141a21;
+  --ink-2: #4b5662;
+  --ink-3: #75808b;
+  --rule: #d7dde3;
+  --accent: #2f55d4;
+  --accent-soft: #e5eafb;
+  --ok: #1b7f45;
+  --warn: #b26a00;
+  --bad: #c62d3a;
+  --idle: #8a939c;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --scale: 1;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1117; --panel: #161c24; --ink: #e8edf2; --ink-2: #aab4bf; --ink-3: #7d8894; --rule: #27303b;
+    --accent: #7c9cff; --accent-soft: #1b2440; --ok: #4cc27a; --warn: #f0a63a; --bad: #ff6b74; --idle: #69737d; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1117; --panel: #161c24; --ink: #e8edf2; --ink-2: #aab4bf; --ink-3: #7d8894; --rule: #27303b;
+  --accent: #7c9cff; --accent-soft: #1b2440; --ok: #4cc27a; --warn: #f0a63a; --bad: #ff6b74; --idle: #69737d; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font: calc(15px * var(--scale))/1.45 var(--body); }
+.wrap { max-width: 1480px; margin: 0 auto; padding: 16px max(16px, env(safe-area-inset-left, 0px)) 40px; display: grid; gap: 16px; }
+body.wall .wrap { max-width: none; padding: 20px 28px; }
+body.wall { --scale: 1.22; }
+h1, h2 { font-family: var(--display); margin: 0; line-height: 1.1; text-wrap: balance; }
+h1 { font-size: 1.6em; font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 1.05em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-2); }
+a { color: var(--accent); }
+button { font: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.top { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; justify-content: space-between; }
+.top .meta { font-family: var(--mono); font-size: 0.8em; color: var(--ink-3); display: flex; gap: 6px 14px; flex-wrap: wrap; align-items: center; }
+.live { display: inline-flex; align-items: center; gap: 6px; }
+.live i { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; }
+.live.err i { background: var(--bad); }
+.live.demo i { background: var(--warn); }
+.controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip { border: 1px solid var(--rule); background: var(--panel); color: var(--ink-2); border-radius: 999px; padding: 4px 12px; cursor: pointer; font-size: 0.85em; }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.chip.ghost { background: transparent; }
+
+.banner { border-left: 3px solid var(--warn); background: var(--panel); padding: 8px 12px; font-size: 0.88em; color: var(--ink-2); }
+.banner.bad { border-color: var(--bad); }
+.banner[hidden] { display: none; }
+
+.kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+.kpi { background: var(--panel); padding: 10px 14px; min-width: 0; }
+.kpi .v { font-family: var(--mono); font-size: 1.55em; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.2; white-space: nowrap; }
+.kpi .l { font-size: 0.78em; color: var(--ink-2); }
+.kpi .v.bad { color: var(--bad); } .kpi .v.warn { color: var(--warn); } .kpi .v.ok { color: var(--ok); }
+@media (max-width: 760px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
+.main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 360px); gap: 16px; align-items: start; }
+@media (max-width: 960px) { .main { grid-template-columns: minmax(0, 1fr); } }
+section { display: grid; gap: 10px; min-width: 0; }
+.sechead { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.sechead small { font-family: var(--mono); color: var(--ink-3); font-size: 0.78em; }
+
+.tracks { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+body.wall .tracks { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.track { background: var(--panel); border: 1px solid var(--rule); border-left: 4px solid var(--accent); padding: 12px 14px; display: grid; gap: 8px; min-width: 0; }
+.track.done { border-left-color: var(--ok); }
+.track.stale { border-left-color: var(--warn); }
+.track.blocked { border-left-color: var(--bad); }
+.track .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.track h3 { font-family: var(--display); font-size: 1.2em; font-weight: 600; margin: 0; }
+.track .owner { font-size: 0.82em; color: var(--ink-3); }
+.pill { font-family: var(--mono); font-size: 0.72em; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+.pill.t1 { color: var(--accent); background: var(--accent-soft); }
+.pill.t2 { color: var(--ink-3); }
+.pill.ok { color: var(--ok); } .pill.bad { color: var(--bad); } .pill.warn { color: var(--warn); } .pill.idle { color: var(--idle); }
+.bar { height: 8px; background: var(--rule); border-radius: 4px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+.track.done .bar > span { background: var(--ok); }
+.track .nums { font-family: var(--mono); font-size: 0.8em; color: var(--ink-2); display: flex; gap: 4px 14px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.track .links { display: flex; gap: 12px; font-size: 0.85em; flex-wrap: wrap; }
+.track .links .none { color: var(--ink-3); }
+.track .next { font-size: 0.85em; color: var(--ink-2); }
+.track .next b { font-weight: 600; color: var(--ink); }
+
+.feed { background: var(--panel); border: 1px solid var(--rule); max-height: 620px; overflow-y: auto; }
+body.wall .feed { max-height: 760px; }
+.post { padding: 9px 12px; border-bottom: 1px solid var(--rule); display: grid; gap: 3px; border-left: 3px solid transparent; }
+.post:last-child { border-bottom: 0; }
+.post.BLOCKED { border-left-color: var(--bad); }
+.post.DECISION { border-left-color: var(--accent); }
+.post.REQ { border-left-color: var(--warn); }
+.post .h { display: flex; gap: 8px; align-items: center; font-size: 0.78em; color: var(--ink-3); font-family: var(--mono); flex-wrap: wrap; }
+.post .h b { color: var(--ink); font-family: var(--body); font-weight: 600; font-size: 1.1em; }
+.post .t { font-size: 0.9em; overflow-wrap: anywhere; }
+.empty { padding: 16px; color: var(--ink-3); font-size: 0.9em; }
+
+.people { display: grid; gap: 14px; }
+.person { display: grid; gap: 8px; }
+.person .who { font-family: var(--display); font-weight: 600; font-size: 1.05em; display: flex; gap: 10px; align-items: baseline; }
+.person .who small { font-family: var(--mono); font-weight: 400; color: var(--ink-3); font-size: 0.72em; }
+.agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+body.wall .agents { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.agent { background: var(--panel); border: 1px solid var(--rule); border-top: 4px solid var(--ok); padding: 10px 12px; display: grid; gap: 5px; min-width: 0; }
+.agent.warn { border-top-color: var(--warn); }
+.agent.bad { border-top-color: var(--bad); }
+.agent.idle { border-top-color: var(--idle); opacity: 0.8; }
+.agent .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.agent .name { font-family: var(--display); font-weight: 600; font-size: 1.1em; }
+.agent .ago { font-family: var(--mono); font-size: 0.8em; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.agent.warn .ago { color: var(--warn); } .agent.bad .ago { color: var(--bad); }
+.agent .t { font-size: 0.86em; color: var(--ink-2); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.agent .ch { font-family: var(--mono); font-size: 0.75em; color: var(--ink-3); white-space: nowrap; }
+.agent .ago { white-space: nowrap; }
+.agent .row.foot { flex-wrap: wrap; gap: 2px 8px; }
+
+dialog { border: 1px solid var(--rule); background: var(--panel); color: var(--ink); padding: 18px; max-width: min(460px, calc(100vw - 32px)); }
+dialog::backdrop { background: rgb(0 0 0 / 0.4); }
+dialog form { display: grid; gap: 10px; }
+dialog label { font-size: 0.85em; color: var(--ink-2); display: grid; gap: 4px; }
+dialog input { font: 0.95em var(--mono); padding: 7px 9px; border: 1px solid var(--rule); background: var(--bg); color: var(--ink); }
+dialog p { margin: 0; font-size: 0.85em; color: var(--ink-2); }
+dialog .btns { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.btn { border: 1px solid var(--ink); background: var(--ink); color: var(--bg); padding: 6px 14px; cursor: pointer; }
+.btn.ghost { background: transparent; color: var(--ink); }
+@media (prefers-reduced-motion: no-preference) { .bar > span { transition: width 0.6s ease; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>HackNCAT Control Room</h1>
+      <div class="meta">
+        <span class="live" id="live"><i></i><span id="liveText">connecting</span></span>
+        <span id="repoText"></span>
+        <span id="updated"></span>
+      </div>
+    </div>
+    <div class="controls" id="controls" aria-label="Show"></div>
+  </header>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <div class="kpis" id="kpis" aria-label="Summary"></div>
+
+  <div class="main">
+    <section aria-labelledby="tracksH">
+      <div class="sechead"><h2 id="tracksH">Tracks</h2><small id="tracksSub"></small></div>
+      <div class="tracks" id="tracks"></div>
+    </section>
+    <section aria-labelledby="feedH">
+      <div class="sechead"><h2 id="feedH">Lead and alerts</h2><small>decisions, blocks, requests</small></div>
+      <div class="feed" id="feed"></div>
+    </section>
+  </div>
+
+  <section aria-labelledby="agentsH">
+    <div class="sechead"><h2 id="agentsH">Agents</h2><small id="agentsSub"></small></div>
+    <div class="people" id="people"></div>
+  </section>
+</div>
+
+<dialog id="settings">
+  <form id="settingsForm">
+    <h2>Settings</h2>
+    <p>Paste a GitHub fine-grained token with <b>Public repositories (read-only)</b> access and no other permissions. It stays in this browser only. Without one, the page refreshes every 2 minutes and everyone on the venue Wi-Fi shares a 60-calls-an-hour limit.</p>
+    <label for="tokenInput">GitHub token<input id="tokenInput" type="password" autocomplete="off" placeholder="github_pat_..."></label>
+    <label for="repoInput">Repository (owner/name)<input id="repoInput" type="text" autocomplete="off"></label>
+    <div class="btns">
+      <button type="button" class="btn ghost" id="clearBtn">Remove token</button>
+      <button type="button" class="btn ghost" id="cancelBtn">Cancel</button>
+      <button type="submit" class="btn">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+/* ===== Edit this block at kickoff ===== */
+const CONFIG = {
+  repo: "aicsquared/orchestration-test1",   // set to OWNER/REPO to see demo data instead
+  branch: "main",
+  deadline: "2026-11-14T17:00:00-05:00",    // submission deadline, Eastern time
+  eventStart: "2026-11-13T16:00:00-05:00",
+  leadIssue: 1,
+  tracks: [                                 // issue = the track's board channel, folder = where its CHECKLIST.md lives
+    { issue: 2, name: "RTX", folder: "rtx", path: "src/app/rtx" },
+    { issue: 3, name: "Cisco", folder: "cisco", path: "src/app/cisco" },
+    { issue: 4, name: "Applied Materials", folder: "amat", path: "src/app/amat" },
+    { issue: 5, name: "Sandia", folder: "sandia", path: "src/app/sandia" },
+    { issue: 6, name: "Lenovo", folder: "lenovo", path: "src/app/lenovo" },
+    { issue: 7, name: "Medtronic", folder: "medtronic", path: "src/app/medtronic" },
+  ],
+  people: [ { name: "Alex", login: "alexwilldev" } ],  // add teammates: name as used in board tags, plus GitHub login
+  warnMin: 10, quietMin: 15, trackStaleMin: 25,
+  pollSec: 30, pollSecNoToken: 120, slowEvery: 4,      // checklists and PRs refresh every 4th poll
+  notAgents: ["Human", "Watchdog"],                    // tags like [Alex's Human] are people, not agents
+};
+/* ====================================== */
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
+};
+const TAG = /^\[([^\]]+?)['’]s\s+([^\]]+)\]\s+([A-Z]+)\b[:\s]*(.*)$/;
+const ago = ms => { const m = Math.max(0, Math.floor(ms / 60000)); return m < 60 ? m + "m" : Math.floor(m / 60) + "h " + String(m % 60).padStart(2, "0") + "m"; };
+const channelName = n => n === CONFIG.leadIssue ? "lead" : (CONFIG.tracks.find(t => t.issue === n)?.folder ?? "#" + n);
+
+const state = {
+  repo: store.get("hncat-repo") || CONFIG.repo,
+  token: store.get("hncat-token") || "",
+  posts: new Map(), since: null, prs: [], checklists: {}, polls: 0,
+  person: null, wall: false, demo: false, error: null, lastOk: null,
+};
+
+/* ---------- routing on the hash: #wall, #demo, #person-alex, combine with hyphens: #demo-wall-person-alex ---------- */
+function readHash() {
+  const parts = location.hash.replace(/^#/, "").toLowerCase().split("-").filter(Boolean);
+  state.wall = parts.includes("wall");
+  const pi = parts.indexOf("person");
+  state.person = pi >= 0 && parts[pi + 1] ? parts[pi + 1] : null;
+  state.demo = parts.includes("demo") || !/^[\w.-]+\/[\w.-]+$/.test(state.repo) || state.repo === "OWNER/REPO";
+  document.body.classList.toggle("wall", state.wall);
+}
+function writeHash() {
+  const p = [];
+  if (state.demo && /demo/.test(location.hash)) p.push("demo");
+  if (state.wall) p.push("wall");
+  if (state.person) p.push("person", state.person);
+  const h = p.length ? "#" + p.join("-") : "";
+  if (location.hash !== h) history.replaceState(null, "", h || location.pathname);
+}
+
+/* ---------- GitHub ---------- */
+async function gh(path, accept) {
+  const headers = { Accept: accept || "application/vnd.github+json" };
+  if (state.token) headers.Authorization = "Bearer " + state.token;
+  const r = await fetch("https://api.github.com" + path, { headers, cache: "no-store" });
+  if (r.status === 403 || r.status === 429) {
+    const reset = r.headers.get("x-ratelimit-reset");
+    throw new Error("GitHub rate limit reached" + (reset ? ", resets at " + new Date(reset * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "") + ". Add a token in Settings.");
+  }
+  if (r.status === 401) throw new Error("GitHub rejected the token. Open Settings and paste a new one.");
+  if (r.status === 404) throw new Error("Repository " + state.repo + " not found. Check it in Settings.");
+  if (!r.ok) throw new Error("GitHub returned " + r.status + ".");
+  return r;
+}
+async function fetchComments() {
+  const start = Math.max(Date.parse(CONFIG.eventStart) || 0, Date.now() - 30 * 3600e3);
+  const since = state.since || new Date(start).toISOString();
+  let url = `/repos/${state.repo}/issues/comments?sort=updated&direction=asc&per_page=100&since=${encodeURIComponent(since)}`;
+  for (let page = 0; page < 15 && url; page++) {
+    const r = await gh(url);
+    for (const c of await r.json()) {
+      const n = +c.issue_url.split("/").pop();
+      state.posts.set(c.id, { id: c.id, issue: n, login: c.user?.login || "", at: Date.parse(c.created_at), body: c.body || "", url: c.html_url });
+      if (!state.since || c.updated_at > state.since) state.since = c.updated_at;
+    }
+    const next = (r.headers.get("link") || "").match(/<https:\/\/api\.github\.com([^>]+)>;\s*rel="next"/);
+    url = next ? next[1] : null;
+  }
+}
+async function fetchSlow() {
+  const r = await gh(`/repos/${state.repo}/pulls?state=all&per_page=100&sort=updated&direction=desc`);
+  state.prs = (await r.json()).map(p => ({ n: p.number, title: p.title, ref: p.head?.ref || "", merged: !!p.merged_at, open: p.state === "open" }));
+  await Promise.all(CONFIG.tracks.map(async t => {
+    try {
+      const path = `${t.path || t.folder}/CHECKLIST.md`;
+      let text;
+      if (state.token) text = await (await gh(`/repos/${state.repo}/contents/${path}?ref=${CONFIG.branch}`, "application/vnd.github.raw")).text();
+      else { const rr = await fetch(`https://raw.githubusercontent.com/${state.repo}/${CONFIG.branch}/${path}`); if (!rr.ok) throw 0; text = await rr.text(); }
+      state.checklists[t.folder] = parseChecklist(text);
+    } catch { /* no checklist yet: the card says so */ }
+  }));
+}
+function parseChecklist(text) {
+  const field = k => (text.match(new RegExp("^\\s*" + k + "\\s*:\\s*(.+)$", "im")) || [])[1]?.trim() || "";
+  const boxes = [...text.matchAll(/^\s*[-*]\s+\[([ xX])\]\s+(.+)$/gm)].map(m => ({ done: m[1] !== " ", text: m[2].trim() }));
+  const url = v => /^https?:\/\//.test(v) ? v : "";
+  return { tier: field("Tier").replace(/\D/g, "") || "", owner: field("Owner"), demo: url(field("Demo")), video: url(field("Video")),
+    submitted: /^(yes|y|true|done|✓)/i.test(field("Submitted")), boxes };
+}
+
+/* ---------- model ---------- */
+function parsePost(p) {
+  const first = p.body.split(/\r?\n/)[0].trim();
+  const m = first.match(TAG);
+  if (!m) return { ...p, person: null, agent: null, label: "", text: first };
+  return { ...p, person: m[1].trim(), agent: m[2].trim(), label: m[3], text: m[4].trim() || p.body.split(/\r?\n/).slice(1).join(" ").trim() };
+}
+function model() {
+  const now = Date.now();
+  const posts = [...state.posts.values()].map(parsePost).sort((a, b) => a.at - b.at);
+  const agents = new Map();
+  for (const p of posts) {
+    if (!p.agent || CONFIG.notAgents.some(x => x.toLowerCase() === p.agent.toLowerCase())) continue;
+    const key = p.person + "'s " + p.agent;
+    const a = agents.get(key) || { key, person: p.person, agent: p.agent, count: 0 };
+    Object.assign(a, { last: p, count: a.count + 1 });
+    agents.set(key, a);
+  }
+  for (const a of agents.values()) {
+    const age = now - a.last.at;
+    a.age = age;
+    a.state = a.last.label === "OFFLINE" ? "idle" : a.last.label === "BLOCKED" ? "bad" : age > CONFIG.quietMin * 60e3 ? "bad" : age > CONFIG.warnMin * 60e3 ? "warn" : "ok";
+    a.why = a.last.label === "OFFLINE" ? "offline" : a.last.label === "BLOCKED" ? "blocked" : a.state === "bad" ? "silent" : a.state === "warn" ? "quiet" : "active";
+  }
+  const tracks = CONFIG.tracks.map(t => {
+    const cl = state.checklists[t.folder];
+    const ch = posts.filter(p => p.issue === t.issue);
+    const last = ch[ch.length - 1];
+    const prs = state.prs.filter(p => new RegExp("(^|[\\[/\\s-])" + t.folder + "([\\]:/\\s-]|$)", "i").test(p.title + " " + p.ref));
+    const done = cl ? cl.boxes.filter(b => b.done).length : 0, total = cl ? cl.boxes.length : 0;
+    const blocked = (() => { for (let i = ch.length - 1; i >= 0; i--) { if (ch[i].label === "BLOCKED") return true; if (ch[i].label === "DONE" || ch[i].label === "STATUS") return false; } return false; })();
+    const stale = last ? now - last.at > CONFIG.trackStaleMin * 60e3 : true;
+    return { ...t, cl, last, done, total, prsMerged: prs.filter(p => p.merged).length, prsOpen: prs.filter(p => p.open).length,
+      next: cl?.boxes.find(b => !b.done)?.text || "", blocked, stale, submitted: !!cl?.submitted };
+  });
+  const feed = posts.filter(p => ["BLOCKED", "DECISION", "REQ", "DIGEST"].includes(p.label) || (p.issue === CONFIG.leadIssue && !["STATUS", "ACK", "OFFLINE"].includes(p.label))).slice(-40).reverse();
+  const names = new Set([...CONFIG.people.map(p => p.name), ...[...agents.values()].map(a => a.person)]);
+  return { posts, agents: [...agents.values()], tracks, feed, people: [...names] };
+}
+
+/* ---------- render ---------- */
+function render() {
+  const M = model(), now = Date.now();
+  const sel = state.person;
+  const match = name => !sel || (name || "").toLowerCase() === sel;
+  const login = CONFIG.people.find(p => p.name.toLowerCase() === sel)?.login;
+
+  // controls
+  const chips = [`<button class="chip" data-person="" aria-pressed="${!sel}">Everyone</button>`]
+    .concat(M.people.map(n => `<button class="chip" data-person="${esc(n.toLowerCase())}" aria-pressed="${sel === n.toLowerCase()}">${esc(n)}</button>`))
+    .concat([`<button class="chip ghost" id="wallBtn" aria-pressed="${state.wall}">Wall view</button>`, `<button class="chip ghost" id="setBtn">Settings</button>`]);
+  $("controls").innerHTML = chips.join("");
+
+  // status line
+  const live = $("live");
+  live.className = "live" + (state.demo ? " demo" : state.error ? " err" : "");
+  $("liveText").textContent = state.demo ? "demo data" : state.error ? "connection problem" : "live";
+  $("repoText").textContent = state.demo ? "set CONFIG.repo to go live" : state.repo;
+  $("updated").textContent = state.lastOk ? "updated " + new Date(state.lastOk).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }) : "";
+  const banner = $("banner");
+  if (state.error) { banner.hidden = false; banner.className = "banner bad"; banner.textContent = state.error; }
+  else if (!state.demo && !state.token) { banner.hidden = false; banner.className = "banner"; banner.textContent = "No GitHub token on this device, so updates come every 2 minutes. Add one in Settings for live updates."; }
+  else banner.hidden = true;
+
+  // KPIs (always team-wide except agent counts follow the filter)
+  const ags = M.agents.filter(a => match(a.person));
+  const left = Date.parse(CONFIG.deadline) - now;
+  const hh = Math.max(0, Math.floor(left / 3600e3)), mm = Math.max(0, Math.floor(left % 3600e3 / 60e3)), ss = Math.max(0, Math.floor(left % 60e3 / 1000));
+  const sumDone = M.tracks.reduce((s, t) => s + t.done, 0), sumTotal = M.tracks.reduce((s, t) => s + t.total, 0);
+  const kp = [
+    [left <= 0 ? "0:00:00" : hh >= 48 ? `${Math.floor(hh / 24)}d ${hh % 24}h` : `${hh}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`, "until submission", left < 3600e3 ? "bad" : left < 3 * 3600e3 ? "warn" : ""],
+    [ags.filter(a => a.state === "ok").length + " / " + ags.filter(a => a.state !== "idle").length, "agents active", ""],
+    [ags.filter(a => a.why === "blocked").length, "blocked", ags.some(a => a.why === "blocked") ? "bad" : ""],
+    [ags.filter(a => a.why === "silent").length, "silent > " + CONFIG.quietMin + " min", ags.some(a => a.why === "silent") ? "warn" : ""],
+    [sumTotal ? Math.round(sumDone / sumTotal * 100) + "%" : "–", `rubric items done (${sumDone}/${sumTotal})`, ""],
+    [M.tracks.filter(t => t.submitted).length + " / " + M.tracks.length, "tracks submitted", M.tracks.every(t => t.submitted) ? "ok" : ""],
+  ];
+  $("kpis").innerHTML = kp.map(([v, l, c]) => `<div class="kpi"><div class="v ${c}">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("");
+
+  // tracks
+  const ts = M.tracks.filter(t => !sel || match(t.cl?.owner));
+  $("tracksSub").textContent = `${M.tracks.reduce((s, t) => s + t.prsMerged, 0)} PRs merged`;
+  $("tracks").innerHTML = ts.length ? ts.map(t => {
+    const cls = t.submitted ? "done" : t.blocked ? "blocked" : t.stale ? "stale" : "";
+    const pct = t.total ? Math.round(t.done / t.total * 100) : 0;
+    const tier = t.cl?.tier ? `<span class="pill ${t.cl.tier === "1" ? "t1" : "t2"}">Tier ${esc(t.cl.tier)}</span>` : `<span class="pill idle">no tier</span>`;
+    const status = t.submitted ? `<span class="pill ok">submitted</span>` : t.blocked ? `<span class="pill bad">blocked</span>` : t.stale ? `<span class="pill warn">quiet ${t.last ? ago(now - t.last.at) : ""}</span>` : `<span class="pill ok">active</span>`;
+    const link = (u, l) => u ? `<a href="${esc(u)}" target="_blank" rel="noopener">${l}</a>` : `<span class="none">${l}: none yet</span>`;
+    return `<article class="track ${cls}">
+      <div class="row"><h3>${esc(t.name)}</h3><span>${tier} ${status}</span></div>
+      <div class="owner">${t.cl?.owner ? "Owner: " + esc(t.cl.owner) : "Owner not set in CHECKLIST.md"} · <span style="font-family:var(--mono)">#${esc(t.folder)}</span></div>
+      <div class="bar" role="img" aria-label="${t.done} of ${t.total} rubric items done"><span style="width:${pct}%"></span></div>
+      <div class="nums"><span>${t.done}/${t.total} rubric</span><span>${t.prsMerged} merged · ${t.prsOpen} open PRs</span><span>last post ${t.last ? ago(now - t.last.at) + " ago" : "never"}</span></div>
+      ${t.cl ? (t.next ? `<div class="next"><b>Next:</b> ${esc(t.next)}</div>` : t.total ? `<div class="next"><b>All rubric items checked.</b></div>` : "") : `<div class="next">No ${esc(t.path || t.folder)}/CHECKLIST.md yet.</div>`}
+      <div class="links">${link(t.cl?.demo, "Demo")}${link(t.cl?.video, "Video")}</div>
+    </article>`;
+  }).join("") : `<div class="empty">No tracks list ${esc(sel)} as owner.</div>`;
+
+  // feed
+  const fd = M.feed.filter(p => !sel || match(p.person) || (login && p.body.toLowerCase().includes("@" + login.toLowerCase())) || /@all\b/i.test(p.body));
+  $("feed").innerHTML = fd.length ? fd.map(p => `<div class="post ${esc(p.label)}">
+      <div class="h"><b>${esc(p.person ? p.person + "'s " + p.agent : "@" + p.login)}</b><span>${esc(p.label || "post")}</span><span>#${esc(channelName(p.issue))}</span><span>${ago(now - p.at)} ago</span></div>
+      <div class="t">${esc(p.text)}</div></div>`).join("") : `<div class="empty">Nothing yet. Decisions, blocks and requests show up here.</div>`;
+
+  // agents grouped by person
+  const byPerson = new Map();
+  const order = n => { const i = M.people.indexOf(n); return i < 0 ? 99 : i; };
+  for (const a of ags.sort((x, y) => order(x.person) - order(y.person) || x.agent.localeCompare(y.agent))) { if (!byPerson.has(a.person)) byPerson.set(a.person, []); byPerson.get(a.person).push(a); }
+  $("agentsSub").textContent = `${ags.length} agents seen · yellow after ${CONFIG.warnMin} min, red after ${CONFIG.quietMin} min`;
+  $("people").innerHTML = byPerson.size ? [...byPerson].map(([person, list]) => `<div class="person">
+      <div class="who">${esc(person)} <small>${list.filter(a => a.state === "ok").length} of ${list.length} active</small></div>
+      <div class="agents">${list.map(a => `<article class="agent ${a.state === "ok" ? "" : a.state}">
+        <div class="row"><span class="name">${esc(a.agent)}</span><span class="pill ${a.state === "ok" ? "ok" : a.state}">${esc(a.last.label)}</span></div>
+        <div class="t" title="${esc(a.last.text)}">${esc(a.last.text)}</div>
+        <div class="row foot"><span class="ch">#${esc(channelName(a.last.issue))} · ${a.count} posts</span><span class="ago">${a.why} · ${ago(a.age)}</span></div>
+      </article>`).join("")}</div></div>`).join("") : `<div class="empty">No agent posts yet. Agents appear here after their first board post.</div>`;
+}
+
+/* ---------- demo data ---------- */
+const DEMO = (() => {
+  const people = { Alex: ["Claude", "Codex", "Gemini", "Local"], Jordan: ["Claude", "Gemini"], Taylor: ["Claude", "Gemini", "Local"], Morgan: ["Gemini", "Local"] };
+  const home = { "Alex's Claude": 6, "Alex's Codex": 3, "Alex's Gemini": 6, "Alex's Local": 6, "Jordan's Claude": 7, "Jordan's Gemini": 7, "Taylor's Claude": 2, "Taylor's Gemini": 5, "Taylor's Local": 2, "Morgan's Gemini": 4, "Morgan's Local": 4 };
+  const lines = {
+    STATUS: ["wired the detector to the live feed, next: confidence overlay", "tests passing (14/14), opening PR", "on-device model loaded, 38 tok/s on the 5060", "dashboard shell merged into shared/, porting track view", "recorded the 90 s demo take 1, trimming now", "schema in shared/contracts.md updated, rebuilding stub"],
+    REVIEW: ["PR #31 meets rubric items 2 and 4; item 5 needs a screenshot in docs/evidence", "checked the brief: they want a written risk assessment, not in our README yet"],
+    FINDING: ["sponsor rep says judges weigh explainability over accuracy", "their sample data has timestamps in UTC, ours assume Eastern"],
+    REQ: ["@alexwilldev need the shared event schema finalized before I wire alerts", "@all who has the HDMI adapter for the dry run?"],
+    BLOCKED: ["Ollama on the Legion fails to load the 14B model (VRAM), need a call: drop to 8B?"],
+    DONE: ["overlay merged in PR #28, screenshot in docs/evidence/overlay.png", "rubric item 3 done: README section on data handling"],
+  };
+  const tracks = {
+    rtx: { tier: "2", owner: "Taylor", n: 8, d: 5 }, cisco: { tier: "1", owner: "Alex", n: 12, d: 7 }, amat: { tier: "2", owner: "Taylor", n: 7, d: 3 },
+    sandia: { tier: "2", owner: "Taylor", n: 8, d: 6 }, lenovo: { tier: "1", owner: "Alex", n: 11, d: 8 }, medtronic: { tier: "2", owner: "Jordan", n: 9, d: 9 },
+  };
+  let id = 1;
+  const rand = a => a[Math.floor(Math.random() * a.length)];
+  function post(tag, label, issue, minsAgo, text) {
+    state.posts.set(id, { id: id++, issue, login: "demo", at: Date.now() - minsAgo * 60e3, body: `[${tag}] ${label} ${text || rand(lines[label])}` });
+  }
+  function seed() {
+    state.posts.clear();
+    post("Alex's Human", "DECISION", 1, 300, "@all Tier 1: Cisco and Lenovo. Everything else Tier 2, built on shared/.");
+    post("Pi's Watchdog", "DIGEST", 1, 42, "quiet agents (> 15 min): Taylor's Local");
+    const ages = { "Alex's Claude": 2, "Alex's Codex": 6, "Alex's Gemini": 11, "Alex's Local": 4, "Jordan's Claude": 1, "Jordan's Gemini": 3, "Taylor's Claude": 8, "Taylor's Gemini": 13, "Taylor's Local": 22, "Morgan's Gemini": 5, "Morgan's Local": 70 };
+    for (const [p, as] of Object.entries(people)) for (const a of as) {
+      const tag = `${p}'s ${a}`;
+      for (let k = 4; k >= 1; k--) post(tag, rand(["STATUS", "STATUS", "REVIEW", "DONE"]), home[tag], ages[tag] + k * 17);
+      post(tag, a === "Gemini" ? rand(["REVIEW", "FINDING"]) : "STATUS", home[tag], ages[tag]);
+    }
+    post("Morgan's Local", "OFFLINE", 4, 70, "laptop on charge, back at 2:30");
+    post("Taylor's Claude", "BLOCKED", 2, 8);
+    post("Jordan's Claude", "REQ", 1, 9);
+    for (const [f, t] of Object.entries(tracks)) {
+      const boxes = Array.from({ length: t.n }, (_, i) => ({ done: i < t.d, text: ["Problem statement in README", "Uses the sponsor dataset", "Working end-to-end demo", "Explain how the model decides", "Data handling and privacy section", "Second-way check of the headline number", "90 s demo video", "Slide deck (5 slides)", "Architecture diagram", "Test results in docs/evidence", "Live deployment URL", "Judge Q&A notes"][i % 12] }));
+      state.checklists[f] = { tier: t.tier, owner: t.owner, boxes, submitted: f === "medtronic",
+        demo: t.d > 4 ? "https://example.com/" + f : "", video: t.d > 6 ? "https://example.com/" + f + "-video" : "" };
+    }
+    state.prs = Array.from({ length: 24 }, (_, i) => ({ n: i + 2, title: Object.keys(tracks)[i % 6] + ": change " + i, ref: "", merged: i < 19, open: i >= 19 }));
+  }
+  function tick() {
+    const tags = Object.entries(people).flatMap(([p, as]) => as.map(a => `${p}'s ${a}`)).filter(t => t !== "Morgan's Local" && t !== "Taylor's Local");
+    const tag = rand(tags);
+    post(tag, rand(["STATUS", "STATUS", "DONE", "REVIEW"]), home[tag], 0);
+    if (Math.random() < 0.35) { const cl = rand(Object.values(state.checklists)); const b = cl.boxes.find(x => !x.done); if (b) b.done = true; }
+  }
+  return { seed, tick };
+})();
+
+/* ---------- loop ---------- */
+let timer = null;
+async function poll() {
+  if (state.demo) { if (state.polls) DEMO.tick(); state.polls++; state.lastOk = Date.now(); state.error = null; render(); return; }
+  try {
+    await fetchComments();
+    if (state.polls % CONFIG.slowEvery === 0) await fetchSlow();
+    state.polls++; state.error = null; state.lastOk = Date.now();
+  } catch (e) { state.error = e.message || "Could not reach GitHub."; }
+  render();
+}
+function start() {
+  clearInterval(timer);
+  state.posts.clear(); state.since = null; state.polls = 0; state.prs = []; state.checklists = {};
+  readHash();
+  if (state.demo) DEMO.seed();
+  poll();
+  timer = setInterval(poll, 1000 * (state.demo ? 8 : state.token ? CONFIG.pollSec : CONFIG.pollSecNoToken));
+}
+setInterval(() => { if (state.lastOk) render(); }, 1000); // keeps the clock and the "ago" times moving
+
+document.addEventListener("click", e => {
+  const chip = e.target.closest("[data-person]");
+  if (chip) { state.person = chip.dataset.person || null; writeHash(); render(); return; }
+  if (e.target.closest("#wallBtn")) { state.wall = !state.wall; document.body.classList.toggle("wall", state.wall); writeHash(); render(); return; }
+  if (e.target.closest("#setBtn")) { $("tokenInput").value = state.token; $("repoInput").value = state.repo; $("settings").showModal(); }
+});
+$("cancelBtn").addEventListener("click", () => $("settings").close());
+$("clearBtn").addEventListener("click", () => { store.set("hncat-token", null); state.token = ""; $("settings").close(); start(); });
+$("settingsForm").addEventListener("submit", e => {
+  e.preventDefault();
+  state.token = $("tokenInput").value.trim(); store.set("hncat-token", state.token || null);
+  const repo = $("repoInput").value.trim(); if (repo) { state.repo = repo; store.set("hncat-repo", repo === CONFIG.repo ? null : repo); }
+  $("settings").close(); start();
+});
+addEventListener("hashchange", () => { const was = state.demo; readHash(); if (was !== state.demo) start(); else render(); });
+start();
+</script>
+</body>
+</html>

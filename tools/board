@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+# Agent message board on a GitHub issue. Needs only `gh` (authenticated).
+# Usage: tools/board <post|read|unread|wait|quiet|whoami> [args]   (see `tools/board help`)
+# Env: BOARD_ISSUE  your home channel: the issue you post to (default 1)
+#      BOARD_WATCH  comma-separated issues you read/wait on (default: BOARD_LEAD + BOARD_ISSUE)
+#      BOARD_LEAD   the lead channel everyone watches (default 1)
+#      BOARD_REPO (default: from git remote), BOARD_LOGIN (override gh user, for tests)
+#      BOARD_LAX=1  skip the label check on posts
+set -u
+
+# Per-person settings: .board.env at the worktree root (git-ignored) fills in any BOARD_* not already set.
+_board_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -f "$_board_root/.board.env" ]; then
+  while IFS='=' read -r _k _v; do
+    case "$_k" in BOARD_*) [ -z "${!_k:-}" ] && export "$_k=${_v//\"/}" ;; esac
+  done < <(grep -E '^BOARD_[A-Z_]+=' "$_board_root/.board.env")
+fi
+ISSUE="${BOARD_ISSUE:-1}"
+HOME_ISSUE="$ISSUE"
+LEAD="${BOARD_LEAD:-1}"
+WATCH="${BOARD_WATCH:-$LEAD,$HOME_ISSUE}"
+LABELS="ACK|DONE|BLOCKED|STATUS|OFFLINE|REQ|REVIEW|FINDING|DIGEST|DECISION"
+valid_issue() { [[ "$1" =~ ^[0-9]+$ ]]; }
+# Unique, validated issue numbers from a comma list
+watch_list() { printf '%s\n' "$WATCH" | tr ', ' '\n\n' | awk 'NF && !seen[$0]++' | while read -r i; do valid_issue "$i" && echo "$i"; done; }
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+STATE_DIR="$ROOT/.board"
+
+die() { echo "board: $*" >&2; exit 1; }
+command -v gh >/dev/null 2>&1 || die "gh not found (https://cli.github.com), then run: gh auth login"
+
+valid_repo() { [[ "$1" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; }
+valid_login() { [[ "$1" =~ ^[A-Za-z0-9-]+$ ]]; }
+
+repo_from_remote() {
+  local url path
+  url="$(git remote get-url origin 2>/dev/null)" || return 1
+  case "$url" in
+    https://*|http://*|ssh://*) path="${url#*://}"; path="${path#*/}" ;;
+    git@*:* ) path="${url#*:}" ;;
+    *) return 1 ;;
+  esac
+  path="${path%.git}"
+  path="${path%/}"
+  valid_repo "$path" || return 1
+  printf '%s\n' "$path"
+}
+
+repo() {
+  local f="$STATE_DIR/repo" r="" cached=""
+  if [ -n "${BOARD_REPO:-}" ]; then
+    valid_repo "$BOARD_REPO" || return 1
+    r="$BOARD_REPO"
+  else
+    if [ -s "$f" ]; then
+      cached="$(cat "$f")"
+      valid_repo "$cached" || cached=""
+    fi
+    r="$(repo_from_remote 2>/dev/null)" || r=""
+    [ -n "$r" ] || r="$cached"
+    if [ -z "$r" ]; then
+      r="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)" || r=""
+      valid_repo "$r" || r=""
+    fi
+    [ -n "$r" ] || return 1
+  fi
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$r" > "$f"
+  printf '%s\n' "$r"
+}
+REPO="$(repo)" || REPO=""
+[ -n "$REPO" ] || die "cannot determine repo; set BOARD_REPO=owner/name"
+
+# GitHub redirects renamed repositories. Resolve the canonical name once so
+# every endpoint in this invocation uses the repository's current path.
+CANONICAL_REPO="$(gh api "repos/$REPO" --jq .full_name 2>/dev/null)" || CANONICAL_REPO=""
+if valid_repo "$CANONICAL_REPO"; then
+  REPO="$CANONICAL_REPO"
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$REPO" > "$STATE_DIR/repo"
+fi
+
+me() {
+  if [ -n "${BOARD_LOGIN:-}" ]; then valid_login "$BOARD_LOGIN" && { echo "$BOARD_LOGIN"; return; }; return 1; fi
+  mkdir -p "$STATE_DIR"
+  local f="$STATE_DIR/login" l
+  if [ -s "$f" ]; then
+    l="$(cat "$f")"
+    if valid_login "$l"; then echo "$l"; return; fi
+  fi
+  l="$(gh api user --jq .login 2>/dev/null)" || return 1
+  valid_login "$l" && { echo "$l" > "$f"; echo "$l"; }
+}
+
+b64d() { base64 -d 2>/dev/null || base64 -D; }
+
+# Row format: id<TAB>login<TAB>created_at<TAB>base64(body). Non-zero on gh failure.
+JQ_ROW='.[] | "\(.id)\t\(.user.login)\t\(.created_at)\t\(.body | @base64)"'
+
+# Comments updated at/after $1 (ISO time). One API call when nothing is new.
+fetch_since() {
+  gh api --paginate "repos/$REPO/issues/$ISSUE/comments?per_page=100&since=$1" --jq "$JQ_ROW" 2>/dev/null
+}
+
+# Last $1 comments without paginating the whole thread (comment count -> jump to last page(s)).
+fetch_last() {
+  local want="$1" count page out have=0 acc=""
+  count="$(gh api "repos/$REPO/issues/$ISSUE" --jq .comments 2>/dev/null)" || return 1
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$count" -gt 0 ] || return 0
+  page=$(( (count + 99) / 100 ))
+  while [ "$page" -ge 1 ] && [ "$have" -lt "$want" ]; do
+    out="$(gh api "repos/$REPO/issues/$ISSUE/comments?per_page=100&page=$page" --jq "$JQ_ROW" 2>/dev/null)" || return 1
+    [ -n "$out" ] && { acc="$out"$'\n'"$acc"; have=$(( have + $(printf '%s\n' "$out" | wc -l) )); }
+    page=$(( page - 1 ))
+  done
+  printf '%s\n' "$acc" | awk 'NF' | tail -n "$want"
+}
+
+# Cursor file holds "<newest seen comment id> <its created_at>".
+cursor_file() { echo "$STATE_DIR/cursor-$(echo "$REPO" | tr '/' '_')-$ISSUE"; }
+get_cursor() { local f; f="$(cursor_file)"; [ -s "$f" ] && cat "$f" || echo ""; }
+set_cursor() { # $1=id $2=created_at; only moves forward
+  mkdir -p "$STATE_DIR"
+  local cur; cur="$(get_cursor | cut -d' ' -f1)"
+  if [ -z "$cur" ] || [ "$1" -gt "$cur" ]; then echo "$1 $2" > "$(cursor_file)"; fi
+}
+
+# stdin: fetch lines. Prints formatted comments; $1 = login to flag mentions for (may be empty)
+render() {
+  local login="$1" id user ts b body flag
+  while IFS=$'\t' read -r id user ts b; do
+    [ -n "$id" ] || continue
+    body="$(printf '%s' "$b" | b64d | tr -d '\r')"
+    flag=""
+    if [ -n "$login" ] && printf '%s' "$body" | grep -qiE "(^|[^A-Za-z0-9_-])@(${login}|all)([^A-Za-z0-9_-]|$)"; then
+      flag=" ** MENTION **"
+    fi
+    printf -- '--- [#%s] @%s %s (#%s)%s\n%s\n' "$ISSUE" "$user" "$ts" "$id" "$flag" "$body"
+  done
+}
+
+# Emit unread comments by others, advance cursor. Returns 0 and prints nothing if none. 1 on fetch failure.
+do_unread() {
+  local all login cur cid cts new maxrow
+  login="$(me)" || return 1
+  cur="$(get_cursor)"; cid="${cur%% *}"; cts="${cur#* }"
+  if [ -z "$cur" ] || [ "$cid" = "$cts" ]; then
+    # first run in this clone (or old-format cursor): last 10 for context
+    all="$(fetch_last 10)" || return 1
+    new="$all"
+  else
+    all="$(fetch_since "$cts")" || return 1
+    new="$(printf '%s\n' "$all" | awk -F'\t' -v c="$cid" 'NF && $1+0 > c+0')"
+  fi
+  [ -n "$new" ] || return 0
+  maxrow="$(printf '%s\n' "$new" | sort -n -t"$(printf '\t')" -k1,1 | tail -1)"
+  new="$(printf '%s\n' "$new" | awk -F'\t' -v me="$login" 'NF && tolower($2) != tolower(me)')"
+  if [ -n "$new" ]; then
+    printf '%s\n' "$new" | render "$login"
+  fi
+  set_cursor "$(printf '%s' "$maxrow" | cut -f1)" "$(printf '%s' "$maxrow" | cut -f3)"
+  return 0
+}
+
+# Unread across every watched issue. Prints posts grouped per channel. 1 if any fetch failed.
+do_unread_all() {
+  local i rc=0 out
+  for i in $(watch_list); do
+    ISSUE="$i"
+    if out="$(do_unread)"; then
+      [ -n "$out" ] && printf '%s\n' "$out"
+    else
+      rc=1
+    fi
+  done
+  ISSUE="$HOME_ISSUE"
+  return $rc
+}
+
+cmd_post() {
+  local text
+  if [ "${1:-}" = "--to" ]; then
+    valid_issue "${2:-}" || die "post --to needs an issue number"
+    ISSUE="$2"; shift 2
+  fi
+  if [ $# -gt 0 ]; then text="$*"; else text="$(cat)"; fi
+  [ -n "$text" ] || die "empty post"
+  case "$text" in
+    "["*"'s "*"]"*) ;;
+    *) die "post must start with [<human>'s <agent>], e.g. [Sam's Claude]" ;;
+  esac
+  if [ "${BOARD_LAX:-}" != "1" ] && ! printf '%s' "$text" | head -n 1 | grep -qE "^\[[^]]+\] +($LABELS)\b"; then
+    die "after the tag, start with a label: ${LABELS//|/, }. e.g. [Sam's Claude] STATUS ..."
+  fi
+  gh api "repos/$REPO/issues/$ISSUE/comments" -f body="$text" --jq .html_url || die "post failed"
+}
+
+cmd_read() {
+  local n=10
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n) n="${2:-}"; shift 2 ;;
+      -n*) n="${1#-n}"; shift ;;
+      --from) valid_issue "${2:-}" || die "read --from needs an issue number"; ISSUE="$2"; shift 2 ;;
+      *) die "read: unknown arg $1" ;;
+    esac
+  done
+  case "$n" in ''|*[!0-9]*) die "read: -n needs a number" ;; esac
+  local all login
+  all="$(fetch_last "$n")" || die "could not reach GitHub"
+  login="$(me)" || login=""
+  [ -n "$all" ] && printf '%s\n' "$all" | tail -n "$n" | render "$login"
+  return 0
+}
+
+cmd_unread() {
+  do_unread_all || { echo "board: could not reach GitHub (cursor unchanged)" >&2; exit 1; }
+}
+
+cmd_wait() {
+  local interval=30 timeout=0 start out
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --interval) interval="${2:-}"; shift 2 ;;
+      --timeout) timeout="${2:-}"; shift 2 ;;
+      *) die "wait: unknown arg $1" ;;
+    esac
+  done
+  case "$interval$timeout" in *[!0-9]*|'') die "wait: --interval/--timeout need whole seconds" ;; esac
+  start="$(date +%s)"
+  while :; do
+    # transient gh errors: ignore and retry next tick
+    out="$(do_unread_all 2>/dev/null)"
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out"
+      exit 0
+    fi
+    if [ "$timeout" -gt 0 ] && [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
+      echo "board: wait timed out after ${timeout}s" >&2
+      exit 124
+    fi
+    sleep "$interval"
+  done
+}
+
+# Who has gone quiet? Looks at the last N posts in every watched issue, finds each
+# agent tag's newest post, and lists tags silent for longer than --minutes.
+# Tags whose newest post is OFFLINE are skipped. --post sends a DIGEST to the lead
+# channel, but only when the set of quiet agents changed since the last digest.
+cmd_quiet() {
+  local mins=15 n=100 do_post=0 i rows="" now quiet state prev
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --minutes) mins="${2:-}"; shift 2 ;;
+      -n) n="${2:-}"; shift 2 ;;
+      --post) do_post=1; shift ;;
+      *) die "quiet: unknown arg $1" ;;
+    esac
+  done
+  case "$mins$n" in *[!0-9]*|'') die "quiet: --minutes/-n need whole numbers" ;; esac
+  for i in $(watch_list); do
+    ISSUE="$i"
+    rows="$rows$(fetch_last "$n")"$'\n' || die "could not reach GitHub"
+  done
+  ISSUE="$HOME_ISSUE"
+  now="$(date +%s)"
+  # rows: id, login, created_at, base64 body. Decode the first line, pull the tag and label.
+  quiet="$(printf '%s\n' "$rows" | while IFS=$'\t' read -r id user ts b; do
+      [ -n "$id" ] || continue
+      first="$(printf '%s' "$b" | b64d | head -n 1 | tr -d '\r')"
+      tag="$(printf '%s' "$first" | sed -nE "s/^\[([^]]+)\].*/\1/p")"
+      [ -n "$tag" ] || continue
+      label="$(printf '%s' "$first" | sed -nE "s/^\[[^]]+\] +([A-Z]+).*/\1/p")"
+      printf '%s\t%s\t%s\t%s\n' "$id" "$ts" "$tag" "${label:-NONE}"
+    done | sort -t$'\t' -k1,1n | awk -F'\t' -v now="$now" -v lim="$((mins * 60))" '
+      function epoch(t,   c) { # 2026-11-13T21:05:09Z -> seconds (UTC), no GNU date needed
+        split(substr(t,1,10), d, "-"); split(substr(t,12,8), h, ":")
+        y=d[1]; m=d[2]; if (m<=2) { y--; m+=12 }
+        c = int(365.25*(y+4716)) + int(30.6001*(m+1)) + d[3] - 1524.5 - int(y/100) + int(int(y/100)/4) + 2
+        return int((c - 2440587.5) * 86400 + 0.5) + h[1]*3600 + h[2]*60 + h[3]
+      }
+      { last[$3]=epoch($2); lab[$3]=$4 }
+      END { for (t in last) if (lab[t] != "OFFLINE" && now - last[t] > lim)
+              printf "%s: silent %d min (last post %s)\n", t, (now-last[t])/60, lab[t] }' | sort)"
+  if [ -z "$quiet" ]; then echo "board: nobody quiet for more than ${mins} min"; else printf '%s\n' "$quiet"; fi
+  [ "$do_post" = 1 ] || return 0
+  mkdir -p "$STATE_DIR"; state="$STATE_DIR/quiet-last"
+  prev="$(cat "$state" 2>/dev/null || true)"
+  [ -n "$quiet" ] || { : > "$state"; return 0; }
+  [ "$(printf '%s' "$quiet" | cut -d: -f1)" = "$(printf '%s' "$prev" | cut -d: -f1)" ] && return 0
+  printf '%s' "$quiet" > "$state"
+  ISSUE="$LEAD"
+  local def_name="Pi's Watchdog"
+  WATCHDOG_NAME="${BOARD_WATCHDOG_NAME:-$def_name}"
+  BOARD_LAX=1 cmd_post "[$WATCHDOG_NAME] DIGEST quiet agents (> ${mins} min, not OFFLINE):
+$quiet
+Humans: check on them. Agents: post STATUS." >/dev/null
+}
+
+case "${1:-help}" in
+  post) shift; cmd_post "$@" ;;
+  read) shift; cmd_read "$@" ;;
+  unread) shift; cmd_unread ;;
+  wait) shift; cmd_wait "$@" ;;
+  quiet) shift; cmd_quiet "$@" ;;
+  whoami) me || die "gh not authenticated" ;;
+  *)
+    cat <<USAGE
+tools/board post [--to N] <text>
+                               post to your home channel (or issue N); text or stdin.
+                               Format: [<human>'s <agent>] LABEL ...  (LABEL: ${LABELS//|/, })
+tools/board read [-n N] [--from I]
+                               last N posts in your home channel (or issue I)
+tools/board unread             new posts by others in every watched channel, then mark read
+tools/board wait [--interval S] [--timeout S]
+                               block until someone else posts in a watched channel; exit 0 (124 on timeout)
+tools/board quiet [--minutes M] [-n N] [--post]
+                               list agents silent > M min (default 15); --post sends a DIGEST to the lead channel
+tools/board whoami             your GitHub login
+Env: BOARD_ISSUE (home, default 1), BOARD_LEAD (default 1), BOARD_WATCH (default lead + home),
+     BOARD_REPO, BOARD_LOGIN, BOARD_LAX=1, BOARD_WATCHDOG_NAME
+USAGE
+    ;;
+esac
